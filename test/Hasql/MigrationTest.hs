@@ -21,7 +21,7 @@ import qualified Hasql.Transaction.Sessions           as Tx
 import           Hasql.Migration
 import           Hasql.Migration.Util                 (existsTable)
 import           Test.Hspec                           (Spec, describe, it,
-                                                       shouldBe, runIO)
+                                                       shouldBe, runIO, expectationFailure)
 import           Hasql.Statement                      (Statement)
 import qualified Hasql.Session                        as Session
 
@@ -102,9 +102,18 @@ migrationSpec con = describe "runMigration" $ do
         r <- runTx con $ runMigration $ (MigrationValidation migrationFile)
         r `shouldBe` Right Nothing
 
+    it "creates an index concurrently without using transactions" $ do
+      let script = (MigrationScript "no-transaction.sql" "create index concurrently t1_c1_idx on t1(c1)")
+      rFail <- runTx con $ runMigration script
+      case rFail of
+        Right res -> expectationFailure $ "Expected an error but got: " <> show res
+        Left _ -> do
+          r <- flip run con $ runMigrationWithoutTransactions script
+          r `shouldBe` Right Nothing
+
     it "gets a list of executed migrations" $ do
         r <- runTx con getMigrations
-        fmap (map schemaMigrationName) r `shouldBe` Right ["test.sql", "1.sql", "s.sql"]
+        fmap (map schemaMigrationName) r `shouldBe` Right ["test.sql", "1.sql", "s.sql", "no-transaction.sql"]
 
     where
         q = "create table t1 (c1 varchar);"
