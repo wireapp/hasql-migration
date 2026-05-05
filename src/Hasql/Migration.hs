@@ -47,14 +47,15 @@ import Hasql.Migration.Util (existsTable)
 import Hasql.Statement
 import Hasql.Transaction
 import System.Directory (getDirectoryContents)
-import qualified Data.ByteString as BS (ByteString, readFile)
+import qualified Data.ByteString as BS (ByteString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Session (Session)
-import Data.ByteString (ByteString)
 import qualified Hasql.Session as Session
+import Data.Text (Text)
+import qualified Data.Text.IO as Text
 
 -- | Executes a 'MigrationCommand'.
 --
@@ -62,18 +63,18 @@ import qualified Hasql.Session as Session
 -- without error. If an error occurs, execution is stopped and
 -- a 'MigrationError' is returned.
 runMigration :: MigrationCommand -> Transaction (Maybe MigrationError)
-runMigration = runMigrationWith sql statement
+runMigration = runMigrationWith (sql . T.encodeUtf8) statement
 
 -- | Like 'runMigration', but does not use transactions. Using this function can
 -- cause the DB to become inconsitent. However, it might be required for
 -- migrations which cannot be run in transactions, e.g. 'CREATE INDEX
 -- CONCURRENTLY'.
 runMigrationWithoutTransactions :: MigrationCommand -> Session (Maybe MigrationError)
-runMigrationWithoutTransactions = runMigrationWith Session.sql Session.statement
+runMigrationWithoutTransactions = runMigrationWith Session.script Session.statement
 
 -- | Like 'runMigrations', but runs plain sql and 'Statement's using the
 -- provided functions.
-runMigrationWith :: Monad m => (ByteString -> m ()) -> (forall a b. a -> Statement a b -> m b) -> MigrationCommand -> m (Maybe MigrationError)
+runMigrationWith :: Monad m => (Text -> m ()) -> (forall a b. a -> Statement a b -> m b) -> MigrationCommand -> m (Maybe MigrationError)
 runMigrationWith executeSql executeStatement cmd = case cmd of
     MigrationInitialization ->
         initializeSchemaWith executeSql >> return Nothing
@@ -93,7 +94,7 @@ loadMigrationsFromDirectory dir = do
 -- 'FilePath'.
 loadMigrationFromFile :: ScriptName -> FilePath -> IO MigrationCommand
 loadMigrationFromFile name fp =
-    MigrationScript name <$> BS.readFile fp
+    MigrationScript name <$> Text.readFile fp
 
 
 -- | Lists all files in the given 'FilePath' 'dir' in alphabetical order.
@@ -104,15 +105,15 @@ scriptsInDirectory dir =
 
 -- | Executes a generic SQL migration for the provided script 'name' with
 -- content 'contents'.
-executeMigrationWith :: Monad m => (ByteString -> m ()) -> (forall a b. a -> Statement a b -> m b) -> ScriptName -> BS.ByteString -> m (Maybe MigrationError)
+executeMigrationWith :: Monad m => (Text -> m ()) -> (forall a b. a -> Statement a b -> m b) -> ScriptName -> Text -> m (Maybe MigrationError)
 executeMigrationWith executeSql executeStatement name contents = do
-    let checksum = md5Hash contents
+    let checksum = md5Hash (T.encodeUtf8 contents)
     checkScriptWith executeStatement name checksum >>= \case
         ScriptOk -> do
             return Nothing
         ScriptNotExecuted -> do
             executeSql contents
-            executeStatement (name, checksum) (Statement q enc Decoders.noResult False)
+            executeStatement (name, checksum) (unpreparable q enc Decoders.noResult)
             return Nothing
         ScriptModified _ -> do
             return (Just $ ScriptChanged name)
@@ -124,7 +125,7 @@ executeMigrationWith executeSql executeStatement name contents = do
 
 -- | Initializes the database schema with a helper table containing
 -- meta-information about executed migrations.
-initializeSchemaWith :: Monad m => (ByteString -> m ()) -> m ()
+initializeSchemaWith :: Monad m => (Text -> m ()) -> m ()
 initializeSchemaWith executeSql = do
     executeSql $ mconcat
         [ "create table if not exists schema_migrations "
@@ -152,7 +153,7 @@ executeValidationWith executeStatement cmd = case cmd of
         return Nothing
     where
         validate name contents =
-            checkScriptWith executeStatement name (md5Hash contents) >>= \case
+            checkScriptWith executeStatement name (md5Hash $ T.encodeUtf8 contents) >>= \case
                 ScriptOk -> do
                     return Nothing
                 ScriptNotExecuted -> do
@@ -169,7 +170,7 @@ executeValidationWith executeStatement cmd = case cmd of
 -- will be executed and its meta-information will be recorded.
 checkScriptWith :: Monad m => (forall a b. a ->  Statement a b -> m b) -> ScriptName -> Checksum -> m CheckScriptResult
 checkScriptWith executeStatement name checksum =
-    executeStatement name (Statement q (contramap T.pack (Encoders.param (Encoders.nonNullable Encoders.text))) (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text))) False) >>= \case
+    executeStatement name (unpreparable q (contramap T.pack (Encoders.param (Encoders.nonNullable Encoders.varchar))) (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.varchar)))) >>= \case
         Nothing ->
             return ScriptNotExecuted
         Just actualChecksum | checksum == actualChecksum ->
@@ -199,7 +200,7 @@ data MigrationCommand
     = MigrationInitialization
     -- ^ Initializes the database with a helper table containing meta
     -- information.
-    | MigrationScript ScriptName BS.ByteString
+    | MigrationScript ScriptName Text
     -- ^ Executes a migration based on the provided bytestring.
     | MigrationValidation MigrationCommand
     -- ^ Validates the provided MigrationCommand.
@@ -223,7 +224,7 @@ data MigrationError = ScriptChanged String | NotInitialised | ScriptMissing Stri
 -- | Produces a list of all executed 'SchemaMigration's.
 getMigrations :: Transaction [SchemaMigration]
 getMigrations =
-    statement () $ Statement q Encoders.noParams (Decoders.rowList decodeSchemaMigration) False
+    statement () $ unpreparable q Encoders.noParams (Decoders.rowList decodeSchemaMigration)
     where
         q = mconcat
             [ "select filename, checksum, executed_at "
@@ -232,7 +233,7 @@ getMigrations =
 
 -- | A product type representing a single, executed 'SchemaMigration'.
 data SchemaMigration = SchemaMigration
-    { schemaMigrationName       :: BS.ByteString
+    { schemaMigrationName       :: T.Text
     -- ^ The name of the executed migration.
     , schemaMigrationChecksum   :: Checksum
     -- ^ The calculated MD5 checksum of the executed script.
@@ -247,6 +248,6 @@ instance Ord SchemaMigration where
 decodeSchemaMigration :: Decoders.Row SchemaMigration
 decodeSchemaMigration =
     SchemaMigration
-    <$> Decoders.column (Decoders.nonNullable Decoders.bytea)
-    <*> Decoders.column (Decoders.nonNullable Decoders.text)
+    <$> Decoders.column (Decoders.nonNullable Decoders.varchar)
+    <*> Decoders.column (Decoders.nonNullable Decoders.varchar)
     <*> Decoders.column (Decoders.nonNullable Decoders.timestamp)

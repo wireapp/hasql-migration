@@ -19,11 +19,17 @@ module Hasql.Migration.Util
 import           Hasql.Statement
 import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Decoders as Decoders
-import Data.Text (Text)
+import           Data.Text         (Text)
+import qualified Data.Text.Encoding as Text
 
 existsTable :: Statement Text Bool
 existsTable =
     fmap (not . null) q
     where
-        q = Statement sql (Encoders.param (Encoders.nonNullable Encoders.text)) (Decoders.rowList (Decoders.column (Decoders.nullable Decoders.int8))) False
+        q = unpreparable sql (Encoders.param (Encoders.nonNullable Encoders.text)) (Decoders.rowList (Decoders.column (Decoders.nullable nameDecoder)))
         sql = "select relname from pg_class where relname = $1"
+
+nameDecoder :: Decoders.Value Text
+nameDecoder =
+    Decoders.custom Nothing "name" (Just (19, 1003)) [] $ \_ bs ->
+        Right $ Text.decodeUtf8 bs

@@ -14,7 +14,7 @@
 
 module Hasql.MigrationTest where
 
-import           Hasql.Session                        (run, SessionError)
+import           Hasql.Errors                         (SessionError)
 import           Hasql.Connection
 import qualified Hasql.Transaction                    as Tx
 import qualified Hasql.Transaction.Sessions           as Tx
@@ -27,11 +27,11 @@ import qualified Hasql.Session                        as Session
 
 runTx :: Connection -> Tx.Transaction a -> IO (Either SessionError a)
 runTx con act = do
-    run (Tx.transaction Tx.ReadCommitted Tx.Write act) con
+    use con (Tx.transaction Tx.ReadCommitted Tx.Write act)
 
 runStatement :: Connection -> a -> Statement a b -> IO (Either SessionError b)
 runStatement con a stmt = do
-  run (Session.statement a stmt) con
+  use con (Session.statement a stmt)
 
 spec :: Connection -> Spec
 spec con =
@@ -108,7 +108,7 @@ migrationSpec con = describe "runMigration" $ do
       case rFail of
         Right res -> expectationFailure $ "Expected an error but got: " <> show res
         Left _ -> do
-          r <- flip run con $ runMigrationWithoutTransactions script
+          r <- use con $ runMigrationWithoutTransactions script
           r `shouldBe` Right Nothing
 
     it "gets a list of executed migrations" $ do
